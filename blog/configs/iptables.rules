@@ -1,0 +1,111 @@
+# iptables 规则导出文件
+# 生成命令：iptables-save > iptables.rules
+# 恢复命令：iptables-restore < iptables.rules
+
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# ============================================
+# 虚机 1 (10.0.1.10) 的入站规则
+# ============================================
+
+# 创建虚机专属链
+-N SG_VM_12345_IN
+-N SG_VM_12345_OUT
+
+# 入站规则
+# HTTP (80)
+-A SG_VM_12345_IN -p tcp --dport 80 -m set --match-set sg_http_src src -j ACCEPT
+
+# HTTPS (443)
+-A SG_VM_12345_IN -p tcp --dport 443 -m set --match-set sg_https_src src -j ACCEPT
+
+# SSH (22) - 仅 VPC 内
+-A SG_VM_12345_IN -p tcp --dport 22 -m set --match-set sg_ssh_src src -j ACCEPT
+
+# ICMP - 仅 VPC 内
+-A SG_VM_12345_IN -p icmp -m set --match-set sg_vpc_net src -j ACCEPT
+
+# 默认拒绝
+-A SG_VM_12345_IN -j DROP
+
+# 出站规则（允许所有）
+-A SG_VM_12345_OUT -j ACCEPT
+
+# ============================================
+# 虚机 2 (10.0.1.20) 的入站规则
+# ============================================
+
+-N SG_VM_12346_IN
+-N SG_VM_12346_OUT
+
+# MySQL (3306) - 仅允许同子网
+-A SG_VM_12346_IN -p tcp --dport 3306 -m set --match-set sg_mysql_src src -j ACCEPT
+
+# SSH (22)
+-A SG_VM_12346_IN -p tcp --dport 22 -m set --match-set sg_ssh_src src -j ACCEPT
+
+# ICMP
+-A SG_VM_12346_IN -p icmp -m set --match-set sg_vpc_net src -j ACCEPT
+
+-A SG_VM_12346_IN -j DROP
+
+-A SG_VM_12346_OUT -j ACCEPT
+
+# ============================================
+# FORWARD 链策略
+# ============================================
+
+# 将虚机入站流量转发到虚机专属链
+-A FORWARD -i vnet12345 -j SG_VM_12345_IN
+-A FORWARD -i vnet12346 -j SG_VM_12346_IN
+
+# 将虚机出站流量转发到虚机专属链
+-A FORWARD -o vnet12345 -j SG_VM_12345_OUT
+-A FORWARD -o vnet12346 -j SG_VM_12346_OUT
+
+# 已建立连接允许
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# 其他流量拒绝
+-A FORWARD -j DROP
+
+COMMIT
+
+# ============================================
+# NAT 表规则
+# ============================================
+
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# SNAT - 虚机出站
+-A POSTROUTING -o eth1 -s 10.0.0.0/16 -j SNAT --to-source 61.152.10.20
+
+# DNAT - 外网访问内部服务
+-A PREROUTING -i eth1 -d 61.152.10.20 -p tcp --dport 80 -j DNAT --to-destination 10.0.1.100:80
+-A PREROUTING -i eth1 -d 61.152.10.20 -p tcp --dport 443 -j DNAT --to-destination 10.0.1.100:443
+
+COMMIT
+
+# ============================================
+# MANGLE 表规则（QoS 标记）
+# ============================================
+
+*mangle
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+
+# 为虚机流量标记（便于 QoS 处理）
+-A FORWARD -i vnet12345 -j MARK --set-mark 0x0001
+-A FORWARD -i vnet12346 -j MARK --set-mark 0x0002
+
+COMMIT

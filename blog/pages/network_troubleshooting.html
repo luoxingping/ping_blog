@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="虚机网络故障完整排查指南 - 分层诊断方法、工具使用、真实案例">
+    <meta name="keywords" content="故障排查,网络诊断,tcpdump,ping,traceroute,工具,调试">
+    <title>虚机网络故障完整排查指南 - 云平台技术博���</title>
+    
+    <link rel="stylesheet" href="../assets/css/main.css">
+    <link rel="stylesheet" href="../assets/css/blog-page.css">
+    
+    <script>
+        const theme = localStorage.getItem('theme');
+        if (theme === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+        }
+    </script>
+</head>
+<body>
+    <div class="header">
+        <div class="header-top">
+            <div style="flex: 1;"></div>
+            <button class="theme-toggle" id="theme-toggle" aria-label="切换主题">
+                <span class="theme-icon" id="theme-icon">🌙</span>
+                <span id="theme-text">暗色模式</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="blog-meta">
+            <div class="blog-meta-item">📅 发布于：2024-11-20</div>
+            <div class="blog-meta-item">⏱️ 阅读时间：18 分钟</div>
+            <div class="blog-meta-item">👁️ 浏览量：850</div>
+            <div class="blog-meta-item">⭐ 难度：中级</div>
+        </div>
+
+        <div class="blog-container">
+            <aside class="blog-toc">
+                <h3>📑 目录</h3>
+                <ul>
+                    <li><a href="#section1">1. 故障诊断框架</a></li>
+                    <li><a href="#section2">2. 第 1 层：物理网络</a></li>
+                    <li><a href="#section3">3. 第 2 层：虚拟网卡</a></li>
+                    <li><a href="#section4">4. 第 3 层：虚拟交换机</a></li>
+                    <li><a href="#section5">5. 第 4 层：路由和 ARP</a></li>
+                    <li><a href="#section6">6. 第 5 层：NAT 和防火墙</a></li>
+                    <li><a href="#section7">7. 常见故障和解决</a></li>
+                    <li><a href="#section8">8. 性能监控工具</a></li>
+                </ul>
+            </aside>
+
+            <main class="blog-content">
+                <h1>🔍 虚机网络故障完整排查指南</h1>
+
+                <div class="note-box">
+                    <strong>文章摘要：</strong>本文提供一套完整的虚机网络故障排查方法论，从物理网络到应用层，分 8 层逐步诊断。每层都有具体的诊断命令、工具使用和常见问题。通过 3 年实战积累，这套方法已成功定位和解决数百个网络故障。
+                </div>
+
+                <!-- 第 1 节 -->
+                <h2 id="section1">1. 故障诊断框架</h2>
+
+                <h3>1.1 OSI 七层模型与诊断流程</h3>
+
+                <p>网络故障排查应该采用<strong>分层诊断法</strong>，从下往上逐层检查，找到第一个故障层。</p>
+
+                <div class="code-block">
+                <div class="code-block-title">八层诊断流程（从下往上）</div>
+                <code>
+【诊断流程】
+
+故障现象：虚机 10.0.1.10 无法访问 10.0.2.20
+
+Layer 1: 物理网络
+  └─ 命令：ethtool, ip link
+  └─ 问题：网卡故障、线缆断裂
+  └─ 正常？继续 ↓
+
+Layer 2: 虚拟网卡
+  └─ 命令：ip addr, ip link show vnet
+  └─ 问题：虚拟网卡未配置、驱动故障
+  └─ 正常？继续 ↓
+
+Layer 3: 虚拟交换机
+  └─ 命令：ovs-vsctl, brctl show, ovs-ofctl
+  └─ 问题：OVS 故障、流表规则错误
+  └─ 正常？继续 ↓
+
+Layer 4: 路由表和 ARP
+  └─ 命令：ip route, arp, ping
+  └─ 问题：路由缺失、ARP 解析失败
+  └─ 正常？继续 ↓
+
+Layer 5: 防火墙和 NAT
+  └─ 命令：iptables -L, ipset list, conntrack
+  └─ 问题：安全组规则拒绝、NAT 转换失败
+  └─ 正常？继续 ↓
+
+Layer 6: 应用层协议
+  └─ 命令：nc, curl, telnet
+  └─ 问题：应用未监听、响应超时
+  └─ 正常？继续 ↓
+
+Layer 7: 应用数据
+  └─ 命令：tcpdump, wireshark
+  └─ 问题：数据格式错误、业务逻辑错误
+
+【关键原则】
+✓ 从下往上逐层检查（物理 → 应用）
+✓ 每层正常才能继续下一层
+✓ 一旦发现问题，立即停止，该层就是故障根因
+✓ 不要跳层，否则容易遗漏真正的原因
+                </code>
+                </div>
+
+                <h3>1.2 诊断工具清单</h3>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>层级</th>
+                            <th>诊断工具</th>
+                            <th>主要功能</th>
+                            <th>使用难度</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>L1 物理</td>
+                            <td>ethtool, ip, mii-tool</td>
+                            <td>网卡状态、链接速率、驱动</td>
+                            <td>⭐ 简单</td>
+                        </tr>
+                        <tr>
+                            <td>L2 数据链路</td>
+                            <td>ip addr, ip link, arp</td>
+                            <td>MAC 地址、VLAN、ARP 表</td>
+                            <td>⭐ 简单</td>
+                        </tr>
+                        <tr>
+                            <td>L3 网络</td>
+                            <td>ping, traceroute, ip route</td>
+                            <td>IP 连通性、路由路径</td>
+                            <td>⭐ 简单</td>
+                        </tr>
+                        <tr>
+                            <td>L4 传输</td>
+                            <td>netstat, ss, nc, telnet</td>
+                            <td>端口状态、连接</td>
+                            <td>⭐⭐ 中等</td>
+                        </tr>
+                        <tr>
+                            <td>L5 会话</td>
+                            <td>iptables, ipset, conntrack</td>
+                            <td>防火墙规则、连接跟踪</td>
+                            <td>⭐⭐⭐ 困难</td>
+                        </tr>
+                        <tr>
+                            <td>L6-7 应用</td>
+                            <td>tcpdump, wireshark, curl</td>
+                            <td>数据包内容、应用协议</td>
+                            <td>⭐⭐⭐ 困难</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 第 2 节 -->
+                <h2 id="section2">2. 第 1 层：物理网络诊断</h2>
+
+                <h3>2.1 网卡状态检查</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">物理网卡诊断命令</div>
+                <code>
+【步骤 1】检查网卡是否启动
+$ ip link show
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+3: eth1: <BROADCAST,MULTICAST> mtu 1500  ❌ 网卡关闭（没有 UP）
+
+✓ 含义：<BROADCAST,MULTICAST,UP,LOWER_UP>
+  • BROADCAST：支持广播
+  • MULTICAST：支持多播
+  • UP：接口已启用
+  • LOWER_UP：物理链路已连接
+
+❌ 问题：接口状态不是 UP，需要启用
+$ ip link set eth0 up
+
+【步骤 2】检查网卡链接速率和模式
+$ ethtool eth0
+Settings for eth0:
+    Supported ports: [ TP ]
+    Supported link modes:   1000baseT/Full
+                            100baseT/Full
+                            10baseT/Full
+    Advertised link modes:  1000baseT/Full
+                            100baseT/Full
+    Advertised pause frame use: No
+    Speed: 1000Mb/s                         ✓ 1000Mbps 速率
+    Duplex: Full                            ✓ 全双工
+    Link detected: yes                      ✓ 链接正常
+
+❌ 问题：
+  • Speed: 10Mb/s（应该是 1000）→ 自协商失败，需要手动设置
+  • Link detected: no → 网线未连接或交换机端口故障
+
+修复：手动设置速率和双工
+$ ethtool -s eth0 speed 1000 duplex full autoneg on
+
+【步骤 3】检查网卡丢包情况
+$ ip -s link show eth0
+RX: bytes packets errors dropped overrun mcast
+    1234567 12345 0 5 0 0      ← 5 个丢弃包，可能有问题
+TX: bytes packets errors dropped carrier collsns
+    7654321 54321 0 0 0 0
+
+常见问题：
+  • dropped > 0：可能是 RX 缓冲区满，需要增加 ring buffer
+  • errors > 0：网卡硬件或线缆问题
+  • overrun > 0：进程处理不及时，丢弃了数据
+
+修复：增加 RX/TX ring buffer
+$ ethtool -G eth0 rx 4096 tx 4096
+$ ethtool -g eth0  # 查看生效情况
+
+【步骤 4】检查网卡驱动和固件
+$ ethtool -i eth0
+driver: igb
+version: 5.14.0
+firmware-version: 2.91, 0x800001c7
+expansion-rom-version:
+bus-info: 0000:05:00.0
+supports-statistics: yes
+supports-test: yes
+supports-eeprom-access: yes
+supports-register-dump: yes
+supports-priv-flags: no
+
+❌ 问题：
+  • firmware-version 过旧，需要更新固件
+  • driver 版本不兼容，需要升级驱动
+
+【步骤 5】检查网卡中断（IRQ）分布
+$ cat /proc/interrupts | grep eth0
+52:   12345678  0  0  0 PCI-MSI eth0
+53:       0  0  0  87654321 PCI-MSI eth0
+
+✓ 正常：IRQ 在多个 CPU 上均匀分布
+❌ 问题：
+  • 所有中断都在 CPU0，其他 CPU 未使用 → 需要配置 IRQ affinity
+  • 中断数过多（> 100K/s），可能网卡过载
+
+修复：配置 IRQ 亲和性
+$ echo 2 > /proc/irq/52/smp_affinity      # 绑定到 CPU 1
+$ echo 4 > /proc/irq/53/smp_affinity      # 绑定到 CPU 2
+                </code>
+                </div>
+
+                <!-- 第 3 节 -->
+                <h2 id="section3">3. 第 2 层：虚拟网卡诊断</h2>
+
+                <h3>3.1 虚拟网卡配置检查</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">虚拟网卡诊断</div>
+                <code>
+【步骤 1】列出所有虚拟网卡
+$ ip addr show
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536
+    inet 127.0.0.1/8 scope host lo
+
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 10.0.1.254/24 scope global eth0
+
+3: br0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet 10.0.1.1/24 scope global br0
+
+4: vnet12345: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    inet6 fe80::fc54:1234:5678:abcd/64 scope link
+
+✓ 虚拟网卡 vnet12345 已创建并配置 IPv6
+
+❌ 问题：
+  • 虚拟网卡不存在 → 虚机未启动或网卡创建失败
+  • 虚拟网卡没有 IPv4 地址 → 虚机配置不完整
+
+【步骤 2】检查虚拟网卡与虚机的对应关系
+$ virsh domiflist vm_instance_1
+Interface  Type    Source         Model      MAC
+vnet12345  bridge  br0            virtio     52:54:00:12:34:56
+
+✓ 虚机 vm_instance_1 使用虚拟网卡 vnet12345，桥接到 br0
+
+❌ 问题：
+  • 网卡类型不对（应该是 bridge 或 network）
+  • Source 不对 → 网卡未连接到交换机
+
+【步骤 3】检查虚拟网卡的 MTU 配置
+$ ip link show vnet12345
+4: vnet12345: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500
+    link/ether 52:54:00:12:34:56 brd ff:ff:ff:ff:ff:ff
+
+✓ MTU = 1500，标准配置
+
+❌ 问题：
+  • MTU 太小（< 1500），可能导致分片和性能下降
+  • MTU 不匹配（虚机 1500，交换机 1450），导致丢包
+
+修复：调整 MTU
+$ ip link set vnet12345 mtu 9000  # Jumbo Frame，用于高性能场景
+
+【步骤 4】检查虚拟网卡的实时统计
+$ ip -s link show vnet12345
+RX: bytes  packets  errors  dropped  overrun  mcast
+    1234567 12345   0       0        0        0      ✓ 正常
+
+TX: bytes  packets  errors  dropped  carrier  collsns
+    7654321 54321   0       0        0        0      ✓ 正常
+
+❌ 问题：
+  • RX packets = 0 → 网卡未收到任何数据，检查下一层
+  • TX packets = 0 → 虚机未发送数据，检查虚机应用
+  • RX errors > 0 → 可能是网卡驱动或硬件问题
+                </code>
+                </div>
+
+                <!-- 第 4 节 -->
+                <h2 id="section4">4. 第 3 层：虚拟交换机诊断</h2>
+
+                <h3>4.1 OVS 交换机诊断</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">OVS 故障诊断</div>
+                <code>
+【步骤 1】检查 OVS 服务状态
+$ systemctl status openvswitch-switch
+● openvswitch-switch.service - OpenVSwitch
+     Loaded: loaded
+     Active: active (running) since Tue 2024-12-10 10:00:00 UTC
+     
+✓ OVS 服务正常运行
+
+❌ 问题：服务未运行
+$ systemctl start openvswitch-switch
+
+【步骤 2】列出所有 Bridge
+$ ovs-vsctl list-br
+br0
+br1
+br2
+
+✓ 列出了所有交换机
+
+❌ 问题：
+  • 没有列出预期的 Bridge → Bridge 创建失败
+  • Bridge 数量不对 → 可能被误删除
+
+【步骤 3】检查 Bridge 端口
+$ ovs-vsctl list-ports br0
+eth0
+vnet12345
+vnet67890
+
+✓ eth0（物理接口）和两个虚拟网卡（vnet）连接到 br0
+
+❌ 问题：
+  • 虚拟网卡没有连接到 Bridge → 虚机无网络
+  • 物理接口不在 Bridge 上 → 虚机无法访问外网
+
+【步骤 4】检查 Bridge 的 VLAN 配置
+$ ovs-vsctl list-ifaces br0
+eth0
+vnet12345
+vnet67890
+
+$ ovs-vsctl get-Port br0 tag
+[]  ← 没有 VLAN 标记
+
+✓ 正常（未配置 VLAN）
+
+❌ 问题：
+  • VLAN 配置不正确 → 虚机间隔离失败
+  • VLAN 标记重复 → 同 VLAN 的虚机冲突
+
+【步骤 5】检查流表（Flow Tables）
+$ ovs-ofctl dump-flows br0
+NXST_FLOW reply (xid=0x4):
+ cookie=0x0, duration=3600.123s, table=0, n_packets=1234567, n_bytes=7654321000, idle_timeout=0, hard_timeout=0, priority=0 actions=NORMAL
+
+✓ NORMAL 规则表示��通 L2 转发（学习 MAC、转发）
+
+❌ 问题：
+  • 没有任何流表规则 → OVS 未初始化
+  • 流表规则过多（> 10000）→ OVS 性能下降
+  • packet count = 0 → 没有数据包经过该规则
+
+【步骤 6】检查 MAC 学习表
+$ ovs-appctl fdb/show br0
+ port  VLAN  MAC                Age
+    1     0  52:54:00:12:34:56   1
+    2     0  52:54:00:78:90:ab   5
+    3     0  52:54:00:cd:ef:12   3
+
+✓ MAC 表中有虚机 MAC 地址
+
+❌ 问题：
+  • MAC 表中没有某个虚机的 MAC → 虚机未发送任何流量
+  • MAC 地址经常变化 → 可能是 MAC 冲突或虚机重启
+
+修复：清空 MAC 表（强制重新学习）
+$ ovs-appctl fdb/flush br0
+                </code>
+                </div>
+
+                <!-- 第 5 节 -->
+                <h2 id="section5">5. 第 4 层：路由和 ARP 诊断</h2>
+
+                <h3>5.1 路由表检查</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">路由和 ARP 诊断</div>
+                <code>
+【步骤 1】查看路由表
+$ ip route show
+default via 10.0.1.254 dev eth0  ← 默认网关
+10.0.1.0/24 dev eth0 scope link  ← 本子网
+10.0.2.0/24 via 10.0.1.254 dev eth0  ← 跨子网路由
+
+✓ 路由配置完整
+
+❌ 问题：
+  • 缺少目标网络路由 → ping 目标 IP 无法通过
+  • 路由指向错误的网关 → 数据包无法到达
+
+修复：添加静态路由
+$ ip route add 10.0.2.0/24 via 10.0.1.254
+
+【步骤 2】测试 IP 连通性（Ping）
+$ ping -c 3 10.0.2.20
+PING 10.0.2.20 (10.0.2.20) 56(84) bytes of data.
+64 bytes from 10.0.2.20: icmp_seq=1 ttl=64 time=0.123 ms
+64 bytes from 10.0.2.20: icmp_seq=2 ttl=64 time=0.145 ms
+64 bytes from 10.0.2.20: icmp_seq=3 ttl=64 time=0.134 ms
+
+--- 10.0.2.20 statistics ---
+3 packets transmitted, 3 received, 0% packet loss, time 2003ms
+rtt min/avg/max/stddev = 0.123/0.134/0.145/0.010 ms
+
+✓ 目标 IP 可达，延迟正常
+
+❌ 问题：
+  • 100% packet loss → IP 不可达（检查路由）
+  • 延迟很高（> 100ms）→ 性能问题（检查 OVS 或网卡）
+  • 部分丢包（20-30%）→ 网络拥塞或规则丢弃
+
+修复诊断：
+  • ping 不通？检查路由 → iptables 规则 → 对端防火墙
+  • 延迟高？检查 netstat -s（看丢包）→ 网卡统计 → OVS 流表
+
+【步骤 3】查看 ARP 表
+$ arp -n
+Address                  HWtype  HWaddress           Flags Mask            Iface
+10.0.1.254              ether   aa:bb:cc:dd:ee:01   C                     eth0
+10.0.2.20               ether   aa:bb:cc:dd:ee:02   C                     eth0
+10.0.1.10               ether   52:54:00:12:34:56   C                     eth0
+
+✓ 所有必要的 ARP 表项都存在
+
+❌ 问题：
+  • 目标 IP 在 ARP 表中不存在 → 需要 ping 触发 ARP 学习
+  • ARP 表项标记为 "FAILED"（F）→ ARP 解析失败
+
+修复：手动 ARP 学习
+$ arping -c 3 10.0.2.20   # 发送无偿 ARP，强制学习
+
+【步骤 4】追踪网络路径
+$ traceroute -m 5 10.0.2.20
+traceroute to 10.0.2.20 (10.0.2.20), 5 hops max, 60 byte packets
+ 1  10.0.1.254 (10.0.1.254)  0.234 ms  0.210 ms  0.245 ms
+ 2  10.0.2.20 (10.0.2.20)   0.123 ms  0.145 ms  0.134 ms
+
+✓ 路径正确，共 2 跳
+
+❌ 问题：
+  • 某跳超时（* * *）→ 该跳可能有防火墙限制 ICMP
+  • 到某跳就停止 → 该跳的路由表配置不完整
+
+【步骤 5】检查 IP 转发是否启用
+$ cat /proc/sys/net/ipv4/ip_forward
+1  ✓ 已启用（1 = 启用，0 = 禁用）
+
+❌ 问题：值是 0，虚拟路由无法转发
+
+修复：启用 IP 转发
+$ echo 1 > /proc/sys/net/ipv4/ip_forward
+$ sysctl -p  # 持久化
+                </code>
+                </div>
+
+                <!-- 第 6 节 -->
+                <h2 id="section6">6. 第 5 层：NAT 和防火墙诊断</h2>
+
+                <h3>6.1 iptables 规则检查</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">防火墙和 NAT 诊断</div>
+                <code>
+【步骤 1】检查 FORWARD 链规则
+$ iptables -L FORWARD -v -n
+Chain FORWARD (policy DROP 0 packets, 0 bytes)
+ pkts bytes target     prot opt in     out     source               destination
+1234567 ...  ACCEPT     all  --  eth0   *       10.0.0.0/16          10.0.0.0/16
+9876543 ...  DROP       all  --  *      *       0.0.0.0/0            0.0.0.0/0
+
+✓ FORWARD 链配置正常
+
+❌ 问题：
+  • policy = DROP，但没有相应的 ACCEPT 规则 → 所有流量被拒绝
+  • 某条规则的 pkts = 0 → 该规则从未匹配
+
+修复：查看具体规则
+$ iptables -L FORWARD --line-numbers -v -n
+
+【步骤 2】检查安全组规则（ipset）
+$ ipset list http_sources
+Name: http_sources
+Type: hash:ip
+Revision: 4
+Header: family inet hashsize 256 maxelem 65536 timeout 0
+Size in memory: 672
+References: 2
+Members:
+10.0.1.1
+10.0.1.2
+...
+
+✓ ipset 中有 IP 地址
+
+❌ 问题：
+  • ipset 为空 → 规则未配置
+  • ipset 引用计数 (References) = 0 → ipset 未被 iptables 使用
+
+修复：检查 iptables 规则是否引用该 ipset
+$ grep -r "http_sources" <(iptables-save)
+
+【步骤 3】检查 NAT 规则
+$ iptables -L -t nat -v -n
+Chain PREROUTING (policy ACCEPT)
+target     prot opt source               destination
+DNAT       tcp  --  0.0.0.0/0            61.152.10.20             tcp dpt:80 to:10.0.1.100
+
+Chain POSTROUTING (policy ACCEPT)
+target     prot opt source               destination
+SNAT       all  --  10.0.0.0/16          0.0.0.0/0                to:61.152.10.20
+
+✓ NAT 规则配置正确
+
+❌ 问题：
+  • DNAT 规则缺失 → 外网无法访问虚机服务
+  • SNAT 规则缺失 → 虚机无法访问外网
+
+【步骤 4】检查 conntrack 连接表
+$ wc -l /proc/net/nf_conntrack
+1234567  ← 当前有 123万条连接
+
+$ cat /proc/sys/net/nf_conntrack_max
+2000000  ← 最大容量 200万
+
+使用率 = 123万 / 200万 = 61.5%  ✓ 正常
+
+❌ 问题：
+  • 使用率 > 90% → 容量不足，需要增加
+  • 使用率 > 99% → conntrack 表满，新连接被拒绝
+
+修复：增加 conntrack 表大小
+$ echo 5000000 > /proc/sys/net/nf_conntrack_max
+$ sysctl -p  # 持久化
+
+【步骤 5】检查 conntrack 表内容
+$ conntrack -L | head -10
+tcp      6 432000 ESTABLISHED src=10.0.1.10 dst=10.0.2.20 sport=34567 dport=80 src=10.0.2.20 dst=10.0.1.10 sport=80 dport=34567 [ASSURED] mark=0 use=1
+
+✓ 连接已建立，ASSURED 标记表示连接已被确认
+
+❌ 问题：
+  • 状态是 TIME_WAIT，但应该是 ESTABLISHED → 连接已关闭
+  • 连接状态未知 → 可能连接跟踪异常
+
+修复：清空 conntrack 表（谨慎操作）
+$ conntrack -F  # 清空所有连接
+                </code>
+                </div>
+
+                <!-- 第 7 节 -->
+                <h2 id="section7">7. 常见故障和解决</h2>
+
+                <h3>7.1 常见故障速查表</h3>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>故障现象</th>
+                            <th>可能原因</th>
+                            <th>诊断命令</th>
+                            <th>解决方案</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>虚机 ping 网关失败</td>
+                            <td>网卡故障、虚拟交换机问题、ARP 失败</td>
+                            <td>ip link show, ovs-vsctl show, arp -n</td>
+                            <td>检查网卡状态 → OVS 流表 → 重新学习 ARP</td>
+                        </tr>
+                        <tr>
+                            <td>能 ping 网关，但 ping 不通其他虚机</td>
+                            <td>路由缺失、防火墙拒绝</td>
+                            <td>ip route, iptables -L FORWARD</td>
+                            <td>添加路由 → 检查安全组规则</td>
+                        </tr>
+                        <tr>
+                            <td>DNS 解析失败</td>
+                            <td>DNS 服务器不可达、53 端口被拒绝</td>
+                            <td>nslookup, tcpdump -i eth0 port 53</td>
+                            <td>检查 DNS 服务器配置 → 允许 53 端口</td>
+                        </tr>
+                        <tr>
+                            <td>HTTP 访问超时</td>
+                            <td>目标端口未监听、防火墙拒绝、网络延迟</td>
+                            <td>netstat -tlnp, iptables -L, nc -zv host 80</td>
+                            <td>启动应用 → 检查安全组 → 检查网络延迟</td>
+                        </tr>
+                        <tr>
+                            <td>丢包率高（> 1%）</td>
+                            <td>网卡缓冲区满、OVS 过载、防火墙规则过多</td>
+                            <td>ip -s link, ovs-appctl bridge/dump-flows, iptables stats</td>
+                            <td>增加 ring buffer → 优化 OVS 流表 → 使用 ipset</td>
+                        </tr>
+                        <tr>
+                            <td>延迟高（> 10ms）</td>
+                            <td>网络拥塞、OVS 性能问题、物理交换机问题</td>
+                            <td>ping -c 100, ovs-ofctl dump-flows, ethtool -S</td>
+                            <td>分析网络流量 → 优化 OVS → 检查网卡</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 第 8 节 -->
+                <h2 id="section8">8. 性能监控工具</h2>
+
+                <h3>8.1 实时监控脚本</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">网络性能监控脚本</div>
+                <code>
+#!/bin/bash
+# 实时监控虚机网络性能
+
+VM_IP=${1:-10.0.1.10}
+INTERVAL=${2:-5}
+
+while true; do
+    echo "=== Network Performance Monitoring ==="
+    echo "Time: $(date '+%H:%M:%S')"
+    
+    # 1. Ping 延迟
+    echo -n "Ping 延迟: "
+    ping -c 1 -W 1 $VM_IP 2>/dev/null | tail -1 | awk '{print $4}' | cut -d '/' -f2
+    
+    # 2. 网卡吞吐量
+    echo -n "网卡吞吐量 (RX): "
+    cat /sys/class/net/eth0/statistics/rx_bytes
+    echo -n "网卡吞吐量 (TX): "
+    cat /sys/class/net/eth0/statistics/tx_bytes
+    
+    # 3. 丢包统计
+    echo -n "RX 丢包: "
+    cat /sys/class/net/eth0/statistics/rx_dropped
+    echo -n "TX 丢包: "
+    cat /sys/class/net/eth0/statistics/tx_dropped
+    
+    # 4. OVS 流表统计
+    echo -n "OVS 流表规则数: "
+    ovs-ofctl dump-flows br0 | wc -l
+    
+    # 5. conntrack 连接数
+    echo -n "conntrack 连接数: "
+    wc -l < /proc/net/nf_conntrack
+    
+    echo "---"
+    sleep $INTERVAL
+done
+                </code>
+                </div>
+
+                <!-- 导航 -->
+                <div class="blog-nav">
+                    <div class="nav-item nav-prev">
+                        <span class="nav-label">上一篇</span>
+                        <a href="iptables_ipset.html" class="nav-button">← iptables+ipset</a>
+                    </div>
+                    <div class="nav-item nav-next">
+                        <span class="nav-label">下一篇</span>
+                        <a href="ha_architecture.html" class="nav-button">高可用架构 →</a>
+                    </div>
+                </div>
+
+                <div class="success-box">
+                    <strong>✓ 本文核心要点：</strong><br>
+                    1. 采用分层诊断法，从物理层往上逐层检查<br>
+                    2. 第一个故障层就是根本原因，不要跳层<br>
+                    3. 每层有对应的诊断工具和命令<br>
+                    4. 常见故障有快速定位方法<br>
+                    5. 定期监控关键指标，提前发现问题<br>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <footer>
+        <p>© 2024 张唯一 - 云平台技术博客 | 3 年云平台开发实战经验</p>
+        <p>
+            <a href="/">博客首页</a> | 
+            <a href="/resume.html">简历</a> | 
+            <a href="mailto:zhangweiy@example.com">邮箱</a>
+        </p>
+    </footer>
+
+    <script src="../assets/js/theme.js"></script>
+    <script src="../assets/js/toc.js"></script>
+</body>
+</html>

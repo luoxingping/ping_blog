@@ -1,0 +1,491 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="VPC 网络架构深度解析 - 从虚机到外部网络的完整数据包路径">
+    <meta name="keywords" content="VPC,网络架构,虚拟路由,数据包,OVS,Linux Bridge">
+    <title>VPC 网络架构深度解析 - 云平台技术博客</title>
+    
+    <link rel="stylesheet" href="../assets/css/main.css">
+    <link rel="stylesheet" href="../assets/css/blog-page.css">
+    
+    <script>
+        const theme = localStorage.getItem('theme');
+        if (theme === 'dark') {
+            document.documentElement.setAttribute('data-theme', 'dark');
+        }
+    </script>
+</head>
+<body>
+    <!-- 头部 -->
+    <div class="header">
+        <div class="header-top">
+            <div style="flex: 1;"></div>
+            <button class="theme-toggle" id="theme-toggle" aria-label="切换主题">
+                <span class="theme-icon" id="theme-icon">🌙</span>
+                <span id="theme-text">暗色模式</span>
+            </button>
+        </div>
+    </div>
+
+    <div class="container">
+        <div class="blog-meta">
+            <div class="blog-meta-item">📅 发布于：2024-12-10</div>
+            <div class="blog-meta-item">⏱️ 阅读时间：15 分钟</div>
+            <div class="blog-meta-item">👁️ 浏览量：1.2K</div>
+            <div class="blog-meta-item">⭐ 难度：中级</div>
+        </div>
+
+        <div class="blog-container">
+            <!-- 左侧目录 -->
+            <aside class="blog-toc">
+                <h3>📑 目录</h3>
+                <ul>
+                    <li><a href="#section1">1. 架构概述</a></li>
+                    <li><a href="#section2">2. 三层分层设计</a></li>
+                    <li><a href="#section3">3. 虚机网络流程</a></li>
+                    <li><a href="#section4">4. 跨子网通信</a></li>
+                    <li><a href="#section5">5. 外网访问流程</a></li>
+                    <li><a href="#section6">6. 故障排查</a></li>
+                    <li><a href="#section7">7. 性能优化</a></li>
+                    <li><a href="#section8">8. 最佳实践</a></li>
+                </ul>
+            </aside>
+
+            <!-- 右侧内容 -->
+            <main class="blog-content">
+                <h1>☁️ VPC 网络架构深度解析</h1>
+
+                <div class="note-box">
+                    <strong>核心要点：</strong>本文详细讲解云平台 VPC 网络架构的完整设计，包括虚拟交换机、路由器、NAT 网关、安全组等核心组件，以及虚机数据包的完整转发路径。
+                </div>
+
+                <!-- 第 1 节 -->
+                <h2 id="section1">1. 架构概述</h2>
+
+                <p>VPC (Virtual Private Cloud) 是云计算中最重要的网络基础设施。在我们的云平台中，VPC 采用<strong>三层分层架构</strong>：</p>
+
+                <ul>
+                    <li><strong>控制面</strong>：负责网络配置、策略下发、状态管理</li>
+                    <li><strong>数据面</strong>：负责虚机流量转发、NAT 转换、安全过滤</li>
+                    <li><strong>网关层</strong>：负责外网访问、负载均衡、流量汇聚</li>
+                </ul>
+
+                <div class="code-block">
+                <div class="code-block-title">VPC 架构分层模型</div>
+                <code>
+┌──────────────────────────────���──────┐
+│         控制面 (Control Plane)       │
+│    - 配置管理  - 策略下发  - 监控   │
+└─────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────┐
+│         数据面 (Data Plane)          │
+│  虚拟交换机 → 路由器 → NAT → 安全组 │
+└─────────────────────────────────────┘
+                    ↓
+┌─────────────────────────────────────┐
+│         网关层 (Gateway Layer)       │
+│    - 外网网关  - 负载均衡  - EIP    │
+└─────────────────────────────────────┘
+                </code>
+                </div>
+
+                <!-- 第 2 节 -->
+                <h2 id="section2">2. 三层分层设计</h2>
+
+                <h3>2.1 虚拟交换机（vSwitch）</h3>
+
+                <p>虚拟交换机是虚机网络流量的<strong>第一跳</strong>，主要功能：</p>
+
+                <ul>
+                    <li>MAC 学习和转发</li>
+                    <li>VLAN 隔离</li>
+                    <li>流量监控和限流</li>
+                    <li>QoS 优先级处理</li>
+                </ul>
+
+                <div class="code-block">
+                <div class="code-block-title">虚拟交换机实现方式</div>
+                <code>
+# 方案 1：基于 OVS (Open vSwitch)
+ovs-vsctl add-br br-vpc1
+ovs-vsctl add-port br-vpc1 eth0
+ovs-vsctl add-port br-vpc1 vnet12345
+
+# 方案 2：基于 Linux Bridge
+brctl addbr br-vpc1
+brctl addif br-vpc1 eth0
+brctl addif br-vpc1 vnet12345
+
+# 查看虚拟交换机信息
+ovs-vsctl show
+ovs-ofctl dump-flows br-vpc1
+                </code>
+                </div>
+
+                <h3>2.2 虚拟路由器（vRouter）</h3>
+
+                <p>虚拟路由器是网络流量的<strong>核心枢纽</strong>，实现：</p>
+
+                <ul>
+                    <li>跨子网路由（三层转发）</li>
+                    <li>NAT 转换（地址转换）</li>
+                    <li>VIP 漂移（高可用）</li>
+                    <li>QoS 和限流</li>
+                </ul>
+
+                <div class="code-block">
+                <div class="code-block-title">虚拟路由器配置示例</div>
+                <code>
+# 创建虚拟路由器接口
+ip link add vr-vpc1 type veth peer name vr-eth0
+
+# 配置 IP 地址
+ip addr add 10.0.1.1/24 dev vr-eth0
+ip addr add 10.0.2.1/24 dev vr-eth1
+
+# 启用 IP 转发
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# 添加静态路由
+ip route add 10.0.0.0/16 via 192.168.100.1
+                </code>
+                </div>
+
+                <h3>2.3 NAT 网关</h3>
+
+                <p>NAT 网关实现虚机与外网的通信，包括：</p>
+
+                <ul>
+                    <li>SNAT：虚机出站流量转换</li>
+                    <li>DNAT：外网入站流量转换</li>
+                    <li>EIP：弹性公网 IP 绑定</li>
+                    <li>连接跟踪：维护转换表</li>
+                </ul>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>功能</th>
+                            <th>源地址</th>
+                            <th>目标地址</th>
+                            <th>用途</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>SNAT</td>
+                            <td>10.0.1.10 → 61.152.10.20</td>
+                            <td>8.8.8.8:53</td>
+                            <td>虚机访问外网</td>
+                        </tr>
+                        <tr>
+                            <td>DNAT</td>
+                            <td>8.8.8.8:53</td>
+                            <td>61.152.10.20:80 → 10.0.1.100:80</td>
+                            <td>外网访问虚机</td>
+                        </tr>
+                        <tr>
+                            <td>EIP</td>
+                            <td>61.152.10.20</td>
+                            <td>10.0.1.100</td>
+                            <td>绑定公网 IP</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 第 3 节 -->
+                <h2 id="section3">3. 虚机网络流程</h2>
+
+                <p>虚机内部数据包的完整转发流程如下：</p>
+
+                <div class="code-block">
+                <div class="code-block-title">虚机发送数据包的完整流程</div>
+                <code>
+步骤 1：应用程序发送数据 (应用层)
+  └─ 数据：TCP SYN 包 | 源IP: 10.0.1.10 | 目标IP: 10.0.2.20
+
+步骤 2：虚机内核处理 (网络层)
+  ├─ 查询路由表：目标 10.0.2.20 → 网关 10.0.1.1
+  ├─ ARP 解析：10.0.1.1 的 MAC 地址
+  └─ 添加 MAC 头：源 MAC | 目标 MAC 10.0.1.1
+
+步骤 3：虚拟网卡输出 (vnet)
+  └─ 数据帧：[MAC 头] [IP 头] [TCP 头] [数据]
+
+步骤 4：虚拟交换机转发 (OVS/Bridge)
+  ├─ MAC 学习：记录源 MAC 来自哪个端口
+  ├─ MAC 查表：查找���标 MAC 所在端口
+  └─ 转发到路由器接口
+
+步骤 5：虚拟路由器处理 (L3)
+  ├─ 检查目标 IP 10.0.2.20
+  ├─ 查询路由表：10.0.2.0/24 → 经由 vr-eth1
+  ├─ TTL 递减：TTL - 1
+  ├─ 重新封装：
+  │  ├─ 新源 MAC：vr-eth1 MAC
+  │  ├─ 新目标 MAC：虚机 10.0.2.20 MAC
+  │  └─ 保持 IP 头和 TCP 头
+  └─ 转发到虚拟交换机 2
+
+步骤 6：虚拟交换机 2 转发 (OVS/Bridge)
+  └─ 转发数据帧到虚机 10.0.2.20 的虚网卡
+
+步骤 7：虚机 2 接收数据
+  ├─ 虚网卡接收数据帧
+  ├─ 内核解析 MAC 头（匹配本机 MAC）
+  ├─ 内核解析 IP 头（匹配本机 IP）
+  ├─ 内核解析 TCP 头（匹配监听端口）
+  └─ 将数据传给应用程序
+                </code>
+                </div>
+
+                <div class="warning-box">
+                    <strong>⚠️ 重要：</strong>注意步骤 4 和 6 中，虚拟交换机在转发时需要学习 MAC 地址。如果长时间没有对向流量，MAC 表项会过期（通常 300 秒），导致转发失败。
+                </div>
+
+                <!-- 第 4 节 -->
+                <h2 id="section4">4. 跨子网通信</h2>
+
+                <p>跨子网通信必须经过虚拟路由器，流程如下：</p>
+
+                <ul>
+                    <li>步骤 1-3：虚机 A 发送数据到虚拟交换机 1</li>
+                    <li>步骤 4：路由器接收，查询路由表，确定下一跳</li>
+                    <li>步骤 5-6：路由器转发到虚拟交换机 2</li>
+                    <li>步骤 7：虚机 B 接收数据</li>
+                </ul>
+
+                <div class="success-box">
+                    <strong>💡 优化建议：</strong>在路由器上启用 ECMP (等价多路径)，可以负载均衡多条链路，提高带宽利用率。
+                </div>
+
+                <!-- 第 5 节 -->
+                <h2 id="section5">5. 外网访问流程</h2>
+
+                <h3>5.1 虚机出站（SNAT）</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">虚机出站流程（访问外网）</div>
+                <code>
+虚机 10.0.1.10 → DNS 查询 (8.8.8.8:53)
+
+步骤 1：虚机发送数据
+  源 IP: 10.0.1.10 | 目标 IP: 8.8.8.8:53
+
+步骤 2：虚拟交换机转发到路由器
+
+步骤 3：路由器 SNAT 转换
+  ├─ 查询 NAT 规则：10.0.0.0/16 出站 → SNAT 到 61.152.10.20
+  ├─ 修改源 IP：10.0.1.10 → 61.152.10.20
+  ├─ 创建 conntrack 记录：
+  │  ├─ 源：10.0.1.10:12345
+  │  └─ 转换后：61.152.10.20:12345
+  └─ 转发到外网网关
+
+步骤 4：外网网关转发到 8.8.8.8
+
+步骤 5：DNS 响应返回
+  源 IP: 8.8.8.8:53 | 目标 IP: 61.152.10.20:12345
+
+步骤 6：路由器反向 SNAT（conntrack 查表）
+  ├─ 查询 conntrack 记录
+  ├─ 目标 IP：61.152.10.20:12345 → 10.0.1.10:12345
+  └─ 转发回虚机 10.0.1.10
+                </code>
+                </div>
+
+                <h3>5.2 外网入站（DNAT）</h3>
+
+                <p>外网用户访问虚机的 Web 服务：</p>
+
+                <div class="code-block">
+                <div class="code-block-title">外网入站流程（DNAT）</div>
+                <code>
+外网用户 → 访问 http://61.152.10.20:80
+
+步骤 1：外网用户发送请求
+  源 IP: 1.1.1.1 | 目标 IP: 61.152.10.20:80
+
+步骤 2：路由器接收 DNAT 规则
+  ├─ 规则：61.152.10.20:80 → 10.0.1.100:80
+  ├─ 修改目标 IP：61.152.10.20 → 10.0.1.100
+  ├─ 创建 conntrack 记录
+  └─ 转发到虚机 10.0.1.100
+
+步骤 3：虚机 Web 服务处理请求并响应
+
+步骤 4：虚机响应数据返回
+  源 IP: 10.0.1.100:80 | 目标 IP: 1.1.1.1
+
+步骤 5：路由器反向 DNAT（conntrack 查表）
+  ├─ 修改源 IP：10.0.1.100 → 61.152.10.20
+  └─ 转发给外网用户 1.1.1.1
+
+步骤 6：外网用户接收响应
+  源 IP: 61.152.10.20:80 | 目标 IP: 1.1.1.1
+                </code>
+                </div>
+
+                <!-- 第 6 节 -->
+                <h2 id="section6">6. 故障排查</h2>
+
+                <h3>6.1 虚机无法访问外网</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">排查步骤（5 层诊断）</div>
+                <code>
+【第 1 层】物理网络
+$ ethtool eth0 | grep "Link detected"
+Link detected: yes  ✓ 网卡正常
+
+【第 2 层】虚拟网卡
+$ ip link show vnet12345
+... LOWER_UP ...  ✓ 虚拟网卡正常
+
+【第 3 层】虚拟交换机
+$ ovs-ofctl dump-flows br-vpc1 | grep vnet12345
+...  ✓ OVS 规则正常
+
+【第 4 层】路由表和 ARP
+$ ip route show
+default via 10.0.1.1 dev eth0  ✓ 路由正确
+$ arp -n | grep 10.0.1.1
+... 00:11:22:33:44:55  ✓ ARP 解析正确
+
+【第 5 层】NAT 和防火墙
+$ iptables -L -n -t nat | grep 10.0.1.10
+... SNAT all -- 10.0.0.0/16 0.0.0.0/0 to:61.152.10.20  ✓ NAT 规则正确
+$ cat /proc/net/nf_conntrack | grep 10.0.1.10
+... (查看连接跟踪表)  ✓ conntrack 正常
+                </code>
+                </div>
+
+                <h3>6.2 常见问题</h3>
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>问题</th>
+                            <th>症状</th>
+                            <th>原因</th>
+                            <th>解决方案</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>无法 ping 网关</td>
+                            <td>网络不可达</td>
+                            <td>虚拟交换机故障</td>
+                            <td>检查 OVS/Bridge 配置</td>
+                        </tr>
+                        <tr>
+                            <td>能 ping 网关但上不了外网</td>
+                            <td>DNS 超时</td>
+                            <td>NAT 规则缺失</td>
+                            <td>添加 SNAT 规则</td>
+                        </tr>
+                        <tr>
+                            <td>DNS 偶发超时</td>
+                            <td>间歇性无法解析</td>
+                            <td>conntrack 表满</td>
+                            <td>增加 nf_conntrack_max</td>
+                        </tr>
+                        <tr>
+                            <td>返程流量丢失</td>
+                            <td>半连接状态</td>
+                            <td>反向 NAT 失败</td>
+                            <td>检查 conntrack 表项</td>
+                        </tr>
+                    </tbody>
+                </table>
+
+                <!-- 第 7 节 -->
+                <h2 id="section7">7. 性能优化</h2>
+
+                <h3>7.1 OVS 流表优化</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">OVS 流表优化配置</div>
+                <code>
+# 增加流表大小
+ovs-vsctl set Bridge br-vpc1 flow_tables:0=@ft
+ovs-vsctl --no-headings --columns _uuid find Flow_Table
+
+# 启用 DPDK（性能提升 10 倍）
+ovs-vsctl set Open_vSwitch . other_config:dpdk-init=true
+
+# 调整缓存参数
+ovs-vsctl set Open_vSwitch . other_config:n-dpdk-rxqs=4
+
+# 查看流表统计
+ovs-ofctl dump-stats br-vpc1
+                </code>
+                </div>
+
+                <h3>7.2 conntrack 优化</h3>
+
+                <div class="code-block">
+                <div class="code-block-title">conntrack 参数调优</div>
+                <code>
+# 增加 conntrack 表大小（默认 65536）
+echo 1000000 > /proc/sys/net/nf_conntrack_max
+
+# 启用 conntrack 复用
+echo 1 > /proc/sys/net/ipv4/tcp_tw_reuse
+
+# 减少超时时间（加快连接释放）
+echo 300 > /proc/sys/net/ipv4/netfilter/ip_conntrack_tcp_timeout_established
+
+# 监控 conntrack 使用情况
+wc -l /proc/net/nf_conntrack
+                </code>
+                </div>
+
+                <!-- 第 8 节 -->
+                <h2 id="section8">8. 最佳实践</h2>
+
+                <div class="note-box">
+                    <strong>✓ 最佳实践清单：</strong>
+                    <ul>
+                        <li>使用虚拟路由器的 ECMP 实现负载均衡</li>
+                        <li>定期监控 conntrack 表占用率</li>
+                        <li>启用 OVS DPDK 提高性能</li>
+                        <li>配置完整的监控和告警体系</li>
+                        <li>定期清理过期的 MAC 表项</li>
+                        <li>使用安全组精细化控制流量</li>
+                    </ul>
+                </div>
+
+                <!-- 导航 -->
+                <div class="blog-nav">
+                    <div class="nav-item nav-prev">
+                        <span class="nav-label">上一篇</span>
+                        <a href="#" class="nav-button">← 博客首页</a>
+                    </div>
+                    <div class="nav-item nav-next">
+                        <span class="nav-label">下一篇</span>
+                        <a href="keepalived_vrrp.html" class="nav-button">Keepalived+VRRP →</a>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- 页脚 -->
+    <footer>
+        <p>© 2024 张唯一 - 云平台技术博客 | 3 年云平台开发实战经验</p>
+        <p>
+            <a href="/">博客首页</a> | 
+            <a href="/resume.html">简历</a> | 
+            <a href="mailto:zhangweiy@example.com">邮箱</a>
+        </p>
+    </footer>
+
+    <!-- 脚本 -->
+    <script src="../assets/js/theme.js"></script>
+    <script src="../assets/js/toc.js"></script>
+</body>
+</html>

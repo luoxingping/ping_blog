@@ -1,0 +1,73 @@
+# ipset 集合定义
+# 恢复命令：ipset restore < ipset.restore
+
+# ============================================
+# HTTP 流量源
+# ============================================
+
+create sg_http_src hash:net family inet hashsize 1024 maxelem 65536
+add sg_http_src 0.0.0.0/0
+add sg_http_src comment "Allow all sources for HTTP"
+
+# ============================================
+# HTTPS 流量源
+# ============================================
+
+create sg_https_src hash:net family inet hashsize 1024 maxelem 65536
+add sg_https_src 0.0.0.0/0
+add sg_https_src comment "Allow all sources for HTTPS"
+
+# ============================================
+# SSH 流量源（仅 VPC 内）
+# ============================================
+
+create sg_ssh_src hash:net family inet hashsize 1024 maxelem 65536
+add sg_ssh_src 10.0.0.0/16
+add sg_ssh_src comment "Allow VPC internal SSH"
+
+# ============================================
+# VPC 网络范围
+# ============================================
+
+create sg_vpc_net hash:net family inet hashsize 1024 maxelem 65536
+add sg_vpc_net 10.0.0.0/16
+add sg_vpc_net comment "VPC internal network"
+
+# ============================================
+# MySQL 数据库源
+# ============================================
+
+create sg_mysql_src hash:net family inet hashsize 1024 maxelem 65536
+add sg_mysql_src 10.0.1.0/24
+add sg_mysql_src 10.0.2.0/24
+add sg_mysql_src comment "Database tier CIDR"
+
+# ============================================
+# Web 服务器 IP
+# ============================================
+
+create sg_web_servers hash:ip family inet hashsize 1024 maxelem 65536
+add sg_web_servers 10.0.1.100
+add sg_web_servers 10.0.1.101
+add sg_web_servers 10.0.1.102
+add sg_web_servers comment "Web server IPs"
+
+# ============================================
+# 负载均衡器地址
+# ============================================
+
+create sg_lb_servers hash:ip family inet hashsize 1024 maxelem 65536
+add sg_lb_servers 10.0.1.10
+add sg_lb_servers 10.0.1.11
+add sg_lb_servers comment "Load balancer IPs"
+
+# ============================================
+# 黑名单 IP
+# ============================================
+
+create sg_blacklist hash:ip family inet hashsize 1024 maxelem 65536
+add sg_blacklist 192.168.100.50
+add sg_blacklist 192.168.100.51
+add sg_blacklist comment "Blocked IPs"
+
+commit
